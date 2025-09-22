@@ -1,0 +1,558 @@
+{
+  "name": "GAO Bid Protest Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "mode": "everyDay",
+        "hour": 12,
+        "minute": 0
+      },
+      "id": "ac38d8dd-5a74-4246-8fd1-1348af235bae",
+      "name": "Daily Schedule",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        -940,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://www.gao.gov/legal/bid-protests/search?sort=field_date&order=desc&_format=json",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json,text/html"
+            }
+          ]
+        },
+        "response": {
+          "response": {
+            "responseFormat": "json"
+          }
+        }
+      },
+      "id": "674c197b-8571-4022-8d17-97a81ec7852b",
+      "name": "Fetch Recent Decisions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        -700,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const staticData = getWorkflowStaticData('global');\nconst baseUrl = 'https://www.gao.gov';\n\nfunction collectEntries(payload) {\n  if (!payload) {\n    return [];\n  }\n  if (Array.isArray(payload)) {\n    return payload;\n  }\n  const candidateKeys = ['results', 'data', 'nodes', 'items', 'search_results'];\n  for (const key of candidateKeys) {\n    const value = payload[key];\n    if (Array.isArray(value)) {\n      return value;\n    }\n    if (value && Array.isArray(value?.data)) {\n      return value.data;\n    }\n  }\n  return [];\n}\n\nfunction unwrap(value) {\n  if (value === undefined || value === null) {\n    return undefined;\n  }\n  if (Array.isArray(value)) {\n    return unwrap(value[0]);\n  }\n  if (typeof value === 'object') {\n    if (value.value !== undefined) {\n      return unwrap(value.value);\n    }\n    if (value.rendered !== undefined) {\n      return unwrap(value.rendered);\n    }\n    if (value.text !== undefined) {\n      return unwrap(value.text);\n    }\n    if (value.url !== undefined) {\n      return unwrap(value.url);\n    }\n    if (value.uri !== undefined) {\n      return unwrap(value.uri);\n    }\n    if (value.href !== undefined) {\n      return unwrap(value.href);\n    }\n    if (value.path !== undefined) {\n      return unwrap(value.path);\n    }\n  }\n  return value;\n}\n\nfunction extractField(entry, keys) {\n  for (const key of keys) {\n    const segments = key.split('.');\n    let current = entry;\n    for (const segment of segments) {\n      if (current === undefined || current === null) {\n        current = undefined;\n        break;\n      }\n      current = current[segment];\n    }\n    const value = unwrap(current);\n    if (value !== undefined && value !== null && value !== '') {\n      return value;\n    }\n  }\n  return undefined;\n}\n\nfunction sanitizeText(value) {\n  const raw = unwrap(value);\n  if (typeof raw !== 'string') {\n    return undefined;\n  }\n  return raw.replace(/\s+/g, ' ').trim();\n}\n\nconst payload = items[0]?.json ?? {};\nconst entries = collectEntries(payload);\n\nif (!staticData.bootstrapComplete) {\n  staticData.bootstrapComplete = true;\n  staticData.knownDecisionIds = entries\n    .map((entry) => sanitizeText(extractField(entry, ['decision_number', 'docket_number', 'appeal_number', 'nid', 'uuid', 'id', 'path', 'view_node', 'url', 'title'])))\n    .filter((value) => value);\n  return [];\n}\n\nconst knownIds = new Set(staticData.knownDecisionIds || []);\nconst newItems = [];\n\nfor (const entry of entries) {\n  const idCandidate = sanitizeText(extractField(entry, ['decision_number', 'docket_number', 'appeal_number', 'nid', 'uuid', 'id', 'product_number', 'title']));\n  if (!idCandidate) {\n    continue;\n  }\n  if (knownIds.has(idCandidate)) {\n    continue;\n  }\n  const title = sanitizeText(extractField(entry, ['title', 'name', 'field_title']));\n  let detailPath = sanitizeText(extractField(entry, ['path', 'link', 'url', 'view_node', 'href']));\n  if (!detailPath) {\n    continue;\n  }\n  if (!detailPath.startsWith('http')) {\n    if (!detailPath.startsWith('/')) {\n      detailPath = `/${detailPath}`;\n    }\n    detailPath = `${baseUrl}${detailPath}`;\n  }\n  const publishedRaw = sanitizeText(extractField(entry, ['decision_date', 'field_date', 'date', 'published_on', 'post_date']));\n  const teaser = sanitizeText(extractField(entry, ['teaser', 'summary', 'excerpt', 'body']));\n\n  knownIds.add(idCandidate);\n  newItems.push({\n    json: {\n      id: idCandidate,\n      title: title || idCandidate,\n      detailUrl: detailPath,\n      published: publishedRaw || null,\n      teaser: teaser || null,\n      rawEntry: entry\n    }\n  });\n}\n\nstaticData.knownDecisionIds = Array.from(knownIds);\nreturn newItems;"
+      },
+      "id": "e91be862-0456-4593-9ebb-fe06f784c21c",
+      "name": "Identify New Decisions",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        -440,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.detailUrl ? $json.detailUrl + ($json.detailUrl.includes('?') ? '&' : '?') + '_format=json' : ''}}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json,text/html"
+            }
+          ]
+        },
+        "response": {
+          "response": {
+            "responseFormat": "json",
+            "outputPropertyName": "detail"
+          }
+        }
+      },
+      "id": "274f5a07-10f5-40b4-98ae-1a3f18879353",
+      "name": "Fetch Decision Detail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        -220,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "clashHandling": {
+            "values": {
+              "resolveClash": "preferInput1"
+            }
+          }
+        }
+      },
+      "id": "d6cfaed1-68f9-4c56-9d4d-3d0ff27b5b38",
+      "name": "Merge Metadata + Detail",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        -20,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "function stripHtml(value) {\n  if (typeof value !== 'string') {\n    return '';\n  }\n  return value.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();\n}\n\nfunction collectStrings(input, acc = []) {\n  if (input === undefined || input === null) {\n    return acc;\n  }\n  if (typeof input === 'string') {\n    acc.push(input);\n    return acc;\n  }\n  if (Array.isArray(input)) {\n    for (const value of input) {\n      collectStrings(value, acc);\n    }\n    return acc;\n  }\n  if (typeof input === 'object') {\n    for (const value of Object.values(input)) {\n      collectStrings(value, acc);\n    }\n  }\n  return acc;\n}\n\nfunction resolveUrl(raw) {\n  if (!raw || typeof raw !== 'string') {\n    return null;\n  }\n  let url = raw.trim();\n  if (!url) {\n    return null;\n  }\n  if (url.startsWith('public://')) {\n    const path = url.replace('public://', '').replace(/^\/+/, '');\n    return `https://www.gao.gov/assets/${path}`;\n  }\n  if (url.startsWith('//')) {\n    return `https:${url}`;\n  }\n  if (url.startsWith('http://') || url.startsWith('https://')) {\n    return url;\n  }\n  if (!url.startsWith('/')) {\n    url = `/${url}`;\n  }\n  return `https://www.gao.gov${url}`;\n}\n\nreturn items.map((item) => {\n  const detail = item.json.detail ?? {};\n  const teaser = item.json.teaser ? stripHtml(String(item.json.teaser)) : null;\n  const textSegments = [];\n\n  const bodyCandidates = [detail.body, detail.field_summary, detail.summary, detail.description, detail.content];\n  for (const candidate of bodyCandidates) {
+    const strings = collectStrings(candidate);
+    for (const value of strings) {
+      const cleaned = stripHtml(value);
+      if (cleaned) {
+        textSegments.push(cleaned);
+      }
+    }
+  }
+  if (teaser) {
+    textSegments.push(teaser);
+  }
+\n  const uniqueSegments = Array.from(new Set(textSegments.filter((value) => value)));
+  const sourceText = uniqueSegments.join('\n\n');
+
+  const pdfCandidates = collectStrings([
+    detail.field_document,
+    detail.field_documents,
+    detail.field_pdf,
+    detail.field_pdf_link,
+    detail.field_pdf_download,
+    detail.field_decision_document,
+    detail.decision_files,
+    detail.files,
+    detail.field_related_files,
+    detail.attachments,
+  ]).filter((value) => typeof value === 'string' && value.toLowerCase().includes('.pdf'));
+
+  let pdfUrl = null;
+  for (const candidate of pdfCandidates) {
+    const resolved = resolveUrl(candidate);
+    if (resolved) {
+      pdfUrl = resolved;
+      break;
+    }
+  }
+
+  const summaryPromptParts = [];
+  summaryPromptParts.push(`GAO bid protest decision: ${item.json.title}`);
+  if (item.json.published) {
+    summaryPromptParts.push(`Decision date: ${item.json.published}`);
+  }
+  summaryPromptParts.push(`Decision URL: ${item.json.detailUrl}`);
+  summaryPromptParts.push('');
+  summaryPromptParts.push('Source material:');
+  summaryPromptParts.push(sourceText || 'No descriptive text was available from the GAO detail page.');
+  summaryPromptParts.push('');
+  summaryPromptParts.push('Craft a briefing that contains:');
+  summaryPromptParts.push('1. Executive Summary (3-4 sentences summarizing the protest, the parties, the issues, and GAO\'s disposition).');
+  summaryPromptParts.push('2. Why it matters for contracting professionals (bullet points with actionable acquisition takeaways).');
+  summaryPromptParts.push('3. Why it matters for the broader GovCon community (bullet points covering market/strategic implications).');
+  summaryPromptParts.push('4. Interesting tidbits (bullet points highlighting notable arguments, procedural quirks, or quotes).');
+  summaryPromptParts.push('If critical facts are unavailable in the source material, explicitly note the gap rather than guessing.');
+
+  const summaryPrompt = summaryPromptParts.join('\n');
+
+  return {
+    json: {
+      id: item.json.id,
+      title: item.json.title,
+      detailUrl: item.json.detailUrl,
+      published: item.json.published,
+      teaser: teaser,
+      pdfUrl,
+      sourceText,
+      summaryPrompt,
+    },
+  };
+});"
+      },
+      "id": "5fe41ff3-e302-4660-be40-b9c699aea978",
+      "name": "Prepare Decision Content",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        180,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"model\": $json.openAiModel ?? 'gpt-4o-mini', \"messages\": [ { \"role\": 'system', \"content\": 'You are a senior analyst who advises U.S. federal contracting professionals and the broader government contracting community. Summaries must be accurate, specific, and practical.' }, { \"role\": 'user', \"content\": $json.summaryPrompt } ], \"temperature\": 0.3, \"max_tokens\": 700 } }}",
+        "response": {
+          "response": {
+            "responseFormat": "json",
+            "outputPropertyName": "openAiResponse"
+          }
+        }
+      },
+      "id": "56d24bdc-93fa-42d6-91f6-9dbae3d29378",
+      "name": "Call OpenAI for Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        420,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "id",
+              "value": "={{$item(0).$node['Prepare Decision Content'].json['id']}}"
+            },
+            {
+              "name": "title",
+              "value": "={{$item(0).$node['Prepare Decision Content'].json['title']}}"
+            },
+            {
+              "name": "detailUrl",
+              "value": "={{$item(0).$node['Prepare Decision Content'].json['detailUrl']}}"
+            },
+            {
+              "name": "published",
+              "value": "={{$item(0).$node['Prepare Decision Content'].json['published'] || ''}}"
+            },
+            {
+              "name": "pdfUrl",
+              "value": "={{$item(0).$node['Prepare Decision Content'].json['pdfUrl'] || ''}}"
+            },
+            {
+              "name": "teaser",
+              "value": "={{$item(0).$node['Prepare Decision Content'].json['teaser'] || ''}}"
+            },
+            {
+              "name": "sourceText",
+              "value": "={{$item(0).$node['Prepare Decision Content'].json['sourceText'] || ''}}"
+            },
+            {
+              "name": "summary",
+              "value": "={{$json.openAiResponse && $json.openAiResponse.choices && $json.openAiResponse.choices[0] ? $json.openAiResponse.choices[0].message.content : ''}}"
+            },
+            {
+              "name": "openAiModel",
+              "value": "={{$json.openAiResponse && $json.openAiResponse.model ? $json.openAiResponse.model : ($json.openAiResponse && $json.openAiResponse.choices && $json.openAiResponse.choices[0] ? $json.openAiResponse.choices[0].message.role : '')}}"
+            },
+            {
+              "name": "generatedAt",
+              "value": "={{$now}}"
+            }
+          ],
+          "number": [
+            {
+              "name": "openAiPromptTokens",
+              "value": "={{$json.openAiResponse && $json.openAiResponse.usage ? $json.openAiResponse.usage.prompt_tokens : 0}}"
+            },
+            {
+              "name": "openAiCompletionTokens",
+              "value": "={{$json.openAiResponse && $json.openAiResponse.usage ? $json.openAiResponse.usage.completion_tokens : 0}}"
+            }
+          ]
+        }
+      },
+      "id": "d3488463-5a16-40ff-b1ba-0bffbb28c52e",
+      "name": "Assemble Summary Output",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [
+        640,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.pdfUrl}}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "a719b64a-4b37-4b5d-8f6a-6f48b12ba9a7",
+      "name": "Has PDF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        380,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.pdfUrl}}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            }
+          ]
+        },
+        "response": {
+          "response": {
+            "responseFormat": "file",
+            "outputPropertyName": "decisionPdf"
+          }
+        }
+      },
+      "id": "080d6b98-5284-4ab8-8346-6889ccfa42d9",
+      "name": "Download Decision PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        640,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {
+          "includeUnpaired": true,
+          "clashHandling": {
+            "values": {
+              "resolveClash": "preferInput1"
+            }
+          }
+        }
+      },
+      "id": "5afbec10-3dcd-4bca-81c2-dcc11ac043df",
+      "name": "Merge Summary + PDF",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        880,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "function escapeHtml(input) {\n  if (typeof input !== 'string') {\n    return '';\n  }\n  return input\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;')\n    .replace(/'/g, '&#39;');\n}\n\nreturn items.map((item) => {\n  const data = item.json || {};\n  const title = data.title || 'GAO Bid Protest Decision';\n  const published = data.published || '';\n  const detailUrl = data.detailUrl || '';\n  const summary = data.summary || '';\n  const teaser = data.teaser || '';\n  const pdfUrl = data.pdfUrl || '';\n  const hasPdf = Boolean(item.binary && item.binary.decisionPdf);\n\n  const subjectParts = [`GAO Bid Protest: ${title}`];\n  if (published) {\n    subjectParts.push(`(${published})`);\n  }\n  const subject = subjectParts.join(' ');\n\n  const textSections = [\n    `GAO Bid Protest Decision: ${title}`\n  ];\n  if (published) {\n    textSections.push(`Decision date: ${published}`);\n  }\n  if (detailUrl) {\n    textSections.push(`GAO detail page: ${detailUrl}`);\n  }\n  if (hasPdf) {\n    textSections.push('The official GAO PDF is attached.');\n  } else if (pdfUrl) {\n    textSections.push(`PDF URL: ${pdfUrl}`);\n  }\n  if (teaser) {\n    textSections.push('');\n    textSections.push('GAO teaser:');\n    textSections.push(teaser);\n  }\n  textSections.push('');\n  if (summary) {\n    textSections.push('AI briefing:');\n    textSections.push(summary);\n  } else {\n    textSections.push('No AI briefing was generated for this decision.');\n  }\n  const textBody = textSections.filter((value) => value !== undefined && value !== null).join('\n');\n\n  const htmlParts = [];\n  htmlParts.push(`<p><strong>Decision:</strong> ${escapeHtml(title)}</p>`);\n  if (published) {\n    htmlParts.push(`<p><strong>Decision date:</strong> ${escapeHtml(published)}</p>`);\n  }\n  if (detailUrl) {\n    const escapedUrl = detailUrl.replace(/"/g, '%22');\n    htmlParts.push(`<p><a href="${escapedUrl}" target="_blank" rel="noopener">View on GAO.gov</a></p>`);\n  }\n  if (teaser) {\n    htmlParts.push(`<p><strong>GAO teaser:</strong> ${escapeHtml(teaser)}</p>`);\n  }\n  htmlParts.push('<h3>AI Briefing</h3>');\n  if (summary) {\n    htmlParts.push(`<pre style=\"white-space: pre-wrap;\">${escapeHtml(summary)}</pre>`);\n  } else {\n    htmlParts.push('<p>No AI summary was generated for this decision.</p>');\n  }\n  if (hasPdf) {\n    htmlParts.push('<p>The official GAO PDF is attached for reference.</p>');\n  } else if (pdfUrl) {\n    const escapedPdf = pdfUrl.replace(/"/g, '%22');\n    htmlParts.push(`<p><a href="${escapedPdf}" target="_blank" rel="noopener">Download the GAO PDF</a></p>`);\n  }\n  htmlParts.push('<p><em>This notification was generated automatically by n8n.</em></p>');\n  const htmlBody = htmlParts.join('\n');\n\n  const defaults = data.email || {};\n  item.json.email = {\n    to: defaults.to || 'contracts-team@example.com',\n    fromEmail: defaults.fromEmail || 'gao-monitor@example.com',\n    cc: defaults.cc || '',\n    bcc: defaults.bcc || '',\n    replyTo: defaults.replyTo || '',\n    subject,\n    textBody,\n    htmlBody\n  };\n\n  return item;\n});"
+      },
+      "id": "c936d0a1-70ef-4d1e-b6e6-1e589ffbf9bb",
+      "name": "Craft Decision Email",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "email",
+        "operation": "send",
+        "fromEmail": "={{$json.email.fromEmail}}",
+        "toEmail": "={{$json.email.to}}",
+        "subject": "={{$json.email.subject}}",
+        "emailFormat": "both",
+        "text": "={{$json.email.textBody}}",
+        "html": "={{$json.email.htmlBody}}",
+        "options": {
+          "attachments": "decisionPdf",
+          "ccEmail": "={{$json.email.cc || ''}}",
+          "bccEmail": "={{$json.email.bcc || ''}}",
+          "replyTo": "={{$json.email.replyTo || ''}}"
+        }
+      },
+      "id": "c9e39269-3373-4df4-8f24-2d20910a9f1e",
+      "name": "Send Decision Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        1380,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Daily Schedule": {
+      "main": [
+        [
+          {
+            "node": "Fetch Recent Decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Recent Decisions": {
+      "main": [
+        [
+          {
+            "node": "Identify New Decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Identify New Decisions": {
+      "main": [
+        [
+          {
+            "node": "Fetch Decision Detail",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Metadata + Detail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Decision Detail": {
+      "main": [
+        [
+          {
+            "node": "Merge Metadata + Detail",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Metadata + Detail": {
+      "main": [
+        [
+          {
+            "node": "Prepare Decision Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Decision Content": {
+      "main": [
+        [
+          {
+            "node": "Call OpenAI for Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Has PDF?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call OpenAI for Summary": {
+      "main": [
+        [
+          {
+            "node": "Assemble Summary Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has PDF?": {
+      "main": [
+        [
+          {
+            "node": "Download Decision PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assemble Summary Output": {
+      "main": [
+        [
+          {
+            "node": "Merge Summary + PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Decision PDF": {
+      "main": [
+        [
+          {
+            "node": "Merge Summary + PDF",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Summary + PDF": {
+      "main": [
+        [
+          {
+            "node": "Craft Decision Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Craft Decision Email": {
+      "main": [
+        [
+          {
+            "node": "Send Decision Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "timezone": "America/New_York",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
+  },
+  "tags": []
+}
